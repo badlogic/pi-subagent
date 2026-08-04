@@ -2,8 +2,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, rmSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { type SelectItem, SelectList, type TUI } from "@earendil-works/pi-tui";
+import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint } from "@earendil-works/pi-coding-agent";
+import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendil-works/pi-tui";
 import {
 	effectiveRunState,
 	inboxDir,
@@ -57,9 +57,26 @@ export default function subagentExtension(pi: ExtensionAPI) {
 				});
 				list.onSelect = (item) => done(item.value);
 				list.onCancel = () => done(undefined);
+
+				const container = new Container();
+				container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+				container.addChild(new Text(theme.fg("accent", theme.bold("Attach to subagent")), 1, 0));
+				container.addChild(list);
+				container.addChild(
+					new Text(
+						theme.fg(
+							"dim",
+							`${keyHint("tui.select.confirm", "attach")}  ${keyHint("tui.select.cancel", "cancel")}`,
+						),
+						1,
+						0,
+					),
+				);
+				container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+
 				return {
-					render: (width) => list.render(width),
-					invalidate: () => list.invalidate(),
+					render: (width) => container.render(width),
+					invalidate: () => container.invalidate(),
 					handleInput: (data) => {
 						list.handleInput(data);
 						customTui.requestRender();
