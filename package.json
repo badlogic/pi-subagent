@@ -1,0 +1,17 @@
+{
+  "name": "@earendil-works/pi-subagent",
+  "version": "0.1.0",
+  "private": true,
+  "keywords": ["pi-package"],
+  "type": "module",
+  "bin": {
+    "subagent": "./subagent.ts"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
