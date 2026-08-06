@@ -9,13 +9,13 @@ Use the `subagent` CLI to delegate work to a separate Pi process with its own co
 
 ## Spawn
 
-By default, the child inherits the current Pi provider, model, and reasoning level from the bash environment:
+Give each child a short, descriptive name. The name appears in the parent UI, while the generated handle remains its stable identifier:
 
 ```sh
-subagent spawn --prompt "Complete task"
+subagent spawn --name implementation --prompt "Complete task"
 ```
 
-Use `--provider`, `--model`, or `--thinking` only when deliberately choosing a different configuration, for example a faster model for simple investigation or a stronger model for difficult review. Never pass `$PI_PROVIDER`, `$PI_MODEL`, or `$PI_REASONING_LEVEL` back to the CLI explicitly.
+By default, the child inherits the current Pi provider, model, and reasoning level from the bash environment. Use `--provider`, `--model`, or `--thinking` only when deliberately choosing a different configuration, for example a faster model for simple investigation or a stronger model for difficult review. Never pass `$PI_PROVIDER`, `$PI_MODEL`, or `$PI_REASONING_LEVEL` back to the CLI explicitly.
 
 `--cwd` defaults to the current directory. Repeat `--prompt` and `--file` as needed; Pi receives all of them in the first user turn. Run `subagent spawn` directly without piping or redirecting its concise output.
 
@@ -68,6 +68,9 @@ subagent wait <handle>
 ## Communicate
 
 ```sh
+# Change the name shown in the parent UI.
+subagent rename <handle> "new name"
+
 # Idle: starts a new prompt. Busy: steers the current work.
 subagent send <handle> "message"
 
@@ -75,7 +78,7 @@ subagent send <handle> "message"
 subagent send <handle> --follow-up "message"
 ```
 
-Messages use the subagent extension's control inbox; do not use `tmux send-keys`.
+Names are 1–64 characters and need not be unique. Messages use the subagent extension's control inbox; do not use `tmux send-keys`.
 
 ## Stop
 

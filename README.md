@@ -23,11 +23,13 @@ Run `/reload` in an existing Pi session. The extension contributes its bundled s
 
 ## Usage
 
-Spawn using the parent session's provider, model, and thinking level:
+Spawn with a descriptive name using the parent session's provider, model, and thinking level:
 
 ```sh
-subagent spawn --prompt "Review the current diff independently"
+subagent spawn --name review --prompt "Review the current diff independently"
 ```
+
+Names appear in the parent UI. Generated handles remain the stable identifiers used by management commands.
 
 Override the model configuration when needed:
 
@@ -58,6 +60,7 @@ Manage a run by its generated handle:
 
 ```sh
 subagent status a1b2c3
+subagent rename a1b2c3 "error handling review"
 subagent send a1b2c3 "Focus on error handling"
 subagent send a1b2c3 --follow-up "Then summarize"
 subagent wait a1b2c3
@@ -65,7 +68,7 @@ subagent stop a1b2c3
 subagent list
 ```
 
-Use `/subagent` to select and attach to an active child. The status widget shows active handles and their current state.
+Use `/subagent` to select and attach to an active child. The status widget shows active names (or handles for unnamed runs) and their current state.
 
 ## Isolation
 

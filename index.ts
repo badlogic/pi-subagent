@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, rmSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint } from "@earendil-works/pi-coding-agent";
@@ -9,9 +9,12 @@ import {
 	inboxDir,
 	listRuns,
 	readMetadata,
+	removeRunDir,
+	runDisplayName,
 	type InboxMessage,
 	type RunMetadata,
 	updateMetadata,
+	waitForRunShutdown,
 } from "./shared.ts";
 
 const packageDir = dirname(fileURLToPath(import.meta.url));
@@ -43,7 +46,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
 			const items: SelectItem[] = runs.map((run) => ({
 				value: run.handle,
-				label: `${run.handle}  ${displayState(run)}  ${run.provider}/${run.model}  ${run.thinking}`,
+				label: `${runDisplayName(run)}  ${displayState(run)}  ${run.provider}/${run.model}  ${run.thinking}`,
 			}));
 			let tui: TUI | undefined;
 			const selected = await ctx.ui.custom<string | undefined>((customTui, theme, _keybindings, done) => {
@@ -129,7 +132,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			const visible = activeRuns.slice(0, 5).map(({ run, state }) => {
 				const color =
 					state === "busy" ? "warning" : state === "idle" ? "success" : state === "error" ? "error" : "muted";
-				return widgetContext!.ui.theme.fg(color, `${run.handle}:${state}`);
+				return widgetContext!.ui.theme.fg(color, `${run.name ?? run.handle}:${state}`);
 			});
 			if (activeRuns.length > visible.length) {
 				visible.push(widgetContext.ui.theme.fg("muted", `+${activeRuns.length - visible.length}`));
@@ -149,15 +152,17 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			widgetTimer.unref();
 		});
 
-		pi.on("session_shutdown", (event, ctx) => {
+		pi.on("session_shutdown", async (event, ctx) => {
 			if (widgetTimer) clearInterval(widgetTimer);
 			widgetTimer = undefined;
 			widgetContext = undefined;
 			ctx.ui.setWidget("subagents", undefined);
 			if (event.reason === "reload") return;
 			for (const run of listRuns(ctx.sessionManager.getSessionId())) {
+				const wasRunning = effectiveRunState(run) !== "exited";
 				spawnSync("tmux", ["kill-session", "-t", run.tmuxSession], { stdio: "ignore" });
-				rmSync(run.runDir, { recursive: true, force: true });
+				if (wasRunning) await waitForRunShutdown(run.runDir);
+				removeRunDir(run.runDir);
 			}
 		});
 		return;
@@ -166,9 +171,20 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	let currentContext: ExtensionContext | undefined;
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let processing = false;
+	let sessionName: string | undefined;
+
+	const syncSessionName = (): void => {
+		const metadata = readMetadata(runDir);
+		if (!metadata) return;
+		const next = `subagent ${metadata.name ?? metadata.handle}`;
+		if (next === sessionName) return;
+		pi.setSessionName(next);
+		sessionName = next;
+	};
 
 	const processInbox = async (): Promise<void> => {
 		if (processing || !currentContext) return;
+		syncSessionName();
 		const queueDir = inboxDir(runDir);
 		if (!existsSync(queueDir)) return;
 		processing = true;
@@ -224,7 +240,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			state: ctx.isIdle() ? "idle" : "busy",
 			error: undefined,
 		});
-		pi.setSessionName(`subagent ${metadata.handle}`);
+		syncSessionName();
 		if (!timer) {
 			timer = setInterval(() => void processInbox(), 250);
 			timer.unref();

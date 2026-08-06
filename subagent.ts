@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { randomBytes } from "node:crypto";
-import { accessSync, constants, existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,8 +13,13 @@ import {
 	listRuns,
 	readLatestAssistant,
 	readMetadata,
+	removeRunDir,
+	runDisplayName,
+	isValidRunName,
 	type InboxMessage,
 	type RunMetadata,
+	updateMetadata,
+	waitForRunShutdown,
 	writeMetadata,
 } from "./shared.ts";
 
@@ -27,10 +32,11 @@ function fail(message: string): never {
 
 function usage(): never {
 	fail(`Usage:
-  subagent spawn [--provider <provider>] [--model <model>] [--thinking <level>] [--cwd <dir>]
-    [--tools <names>] [--no-extensions] [--no-skills] [--no-prompt-templates]
-    [--no-context-files] (--prompt <text> | --file <path>)...
+  subagent spawn [--name <name>] [--provider <provider>] [--model <model>] [--thinking <level>]
+    [--cwd <dir>] [--tools <names>] [--no-extensions] [--no-skills]
+    [--no-prompt-templates] [--no-context-files] (--prompt <text> | --file <path>)...
   subagent status <handle>
+  subagent rename <handle> <name>
   subagent send <handle> [--follow-up] <message>
   subagent wait <handle> [--timeout <seconds>]
   subagent stop <handle>
@@ -41,6 +47,12 @@ function valueAfter(args: string[], index: number, option: string): string {
 	const value = args[index + 1];
 	if (!value || value.startsWith("--")) fail(`${option} requires a value`);
 	return value;
+}
+
+function normalizeRunName(value: string): string {
+	const name = value.trim();
+	if (!isValidRunName(name)) fail("Subagent name must be a single line of 1 to 64 characters");
+	return name;
 }
 
 function runDirForHandle(handle: string): string {
@@ -69,6 +81,7 @@ function generateHandle(): string {
 
 function spawnSubagent(args: string[]): void {
 	if (process.env.PI_SUBAGENT_RUN_DIR) fail("Nested subagents are disabled");
+	let name: string | undefined;
 	let provider = process.env.PI_PROVIDER;
 	let model = process.env.PI_MODEL;
 	let thinking = process.env.PI_REASONING_LEVEL || "medium";
@@ -84,6 +97,10 @@ function spawnSubagent(args: string[]): void {
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
 		switch (arg) {
+			case "--name":
+				name = normalizeRunName(valueAfter(args, i, arg));
+				i++;
+				break;
 			case "--provider":
 				provider = valueAfter(args, i, arg);
 				i++;
@@ -148,9 +165,10 @@ function spawnSubagent(args: string[]): void {
 	writeFileSync(sessionFile, "", { mode: 0o600 });
 
 	const now = new Date().toISOString();
-	writeMetadata({
+	const metadata: RunMetadata = {
 		version: 1,
 		handle,
+		name,
 		parentSessionId: process.env.PI_SESSION_ID || undefined,
 		parentSessionFile: process.env.PI_SESSION_FILE || undefined,
 		tmuxSession,
@@ -164,7 +182,8 @@ function spawnSubagent(args: string[]): void {
 		hasStarted: false,
 		createdAt: now,
 		updatedAt: now,
-	});
+	};
+	writeMetadata(metadata);
 
 	let launcher = "pi";
 	const testLauncher = join(cwd, "pi-test.sh");
@@ -215,19 +234,28 @@ function spawnSubagent(args: string[]): void {
 		{ encoding: "utf8" },
 	);
 	if (result.status !== 0) {
-		rmSync(runDir, { recursive: true, force: true });
+		removeRunDir(runDir);
 		fail(result.stderr.trim() || "Failed to create tmux session");
 	}
 
-	process.stdout.write(`Spawned ${handle}\nState: busy\nAttach: tmux attach -t ${tmuxSession}\n`);
+	process.stdout.write(`Spawned ${runDisplayName(metadata)}\nState: busy\nAttach: tmux attach -t ${tmuxSession}\n`);
 }
 
 function statusSubagent(args: string[]): void {
 	if (args.length !== 1) usage();
 	const metadata = getRun(args[0]);
 	process.stdout.write(
-		`${metadata.handle}: ${effectiveRunState(metadata)} (${metadata.provider}/${metadata.model}, ${metadata.thinking})\nAttach: tmux attach -t ${metadata.tmuxSession}\n`,
+		`${runDisplayName(metadata)}: ${effectiveRunState(metadata)} (${metadata.provider}/${metadata.model}, ${metadata.thinking})\nAttach: tmux attach -t ${metadata.tmuxSession}\n`,
 	);
+}
+
+function renameSubagent(args: string[]): void {
+	if (args.length !== 2) usage();
+	const metadata = getRun(args[0]);
+	const name = normalizeRunName(args[1]);
+	const updated = updateMetadata(metadata.runDir, { name });
+	if (!updated) fail(`Could not rename subagent: ${metadata.handle}`);
+	process.stdout.write(`Renamed ${runDisplayName(updated)}\n`);
 }
 
 function sendSubagent(args: string[]): void {
@@ -256,7 +284,7 @@ function sendSubagent(args: string[]): void {
 
 	const state = effectiveRunState(metadata);
 	const verb = followUp && state === "busy" ? "Queued follow-up for" : state === "idle" ? "Prompted" : "Steered";
-	process.stdout.write(`${verb} ${handle}\n`);
+	process.stdout.write(`${verb} ${runDisplayName(metadata)}\n`);
 }
 
 function parseTimeout(args: string[]): number {
@@ -293,12 +321,14 @@ async function waitSubagent(args: string[]): Promise<void> {
 	fail(`Timed out after ${timeoutSeconds}s waiting for ${handle}`);
 }
 
-function stopSubagent(args: string[]): void {
+async function stopSubagent(args: string[]): Promise<void> {
 	if (args.length !== 1) usage();
 	const metadata = getRun(args[0]);
+	const wasRunning = tmuxExists(metadata.tmuxSession);
 	spawnSync("tmux", ["kill-session", "-t", metadata.tmuxSession], { stdio: "ignore" });
-	rmSync(metadata.runDir, { recursive: true, force: true });
-	process.stdout.write(`Stopped ${metadata.handle}\n`);
+	if (wasRunning) await waitForRunShutdown(metadata.runDir);
+	removeRunDir(metadata.runDir);
+	process.stdout.write(`Stopped ${runDisplayName(metadata)}\n`);
 }
 
 function listSubagents(args: string[]): void {
@@ -310,7 +340,7 @@ function listSubagents(args: string[]): void {
 	}
 	for (const metadata of runs) {
 		process.stdout.write(
-			`${metadata.handle}  ${effectiveRunState(metadata).padEnd(8)}  ${metadata.provider}/${metadata.model}  ${metadata.thinking}\n`,
+			`${runDisplayName(metadata)}  ${effectiveRunState(metadata).padEnd(8)}  ${metadata.provider}/${metadata.model}  ${metadata.thinking}\n`,
 		);
 	}
 }
@@ -325,6 +355,9 @@ async function main(): Promise<void> {
 		case "status":
 			statusSubagent(args);
 			break;
+		case "rename":
+			renameSubagent(args);
+			break;
 		case "send":
 			sendSubagent(args);
 			break;
@@ -332,7 +365,7 @@ async function main(): Promise<void> {
 			await waitSubagent(args);
 			break;
 		case "stop":
-			stopSubagent(args);
+			await stopSubagent(args);
 			break;
 		case "list":
 			listSubagents(args);

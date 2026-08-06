@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -8,6 +8,7 @@ export type RunState = "starting" | "busy" | "idle" | "exited" | "error";
 export interface RunMetadata {
 	version: 1;
 	handle: string;
+	name?: string;
 	parentSessionId?: string;
 	parentSessionFile?: string;
 	childSessionId?: string;
@@ -65,6 +66,20 @@ export function inboxDir(runDir: string): string {
 	return join(runDir, "inbox");
 }
 
+export function isValidRunName(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= 64 &&
+		value.trim() === value &&
+		!/[\u0000-\u001f\u007f]/.test(value)
+	);
+}
+
+export function runDisplayName(metadata: RunMetadata): string {
+	return metadata.name ? `${metadata.name} (${metadata.handle})` : metadata.handle;
+}
+
 export function readMetadata(runDir: string): RunMetadata | undefined {
 	try {
 		const value: unknown = JSON.parse(readFileSync(metadataPath(runDir), "utf8"));
@@ -73,6 +88,7 @@ export function readMetadata(runDir: string): RunMetadata | undefined {
 		if (
 			metadata.version !== 1 ||
 			typeof metadata.handle !== "string" ||
+			(metadata.name !== undefined && !isValidRunName(metadata.name)) ||
 			typeof metadata.tmuxSession !== "string" ||
 			typeof metadata.sessionFile !== "string" ||
 			typeof metadata.runDir !== "string"
@@ -106,6 +122,19 @@ export function updateMetadata(runDir: string, patch: Partial<RunMetadata>): Run
 	};
 	writeMetadata(next);
 	return next;
+}
+
+export async function waitForRunShutdown(runDir: string, timeoutMs = 2000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const metadata = readMetadata(runDir);
+		if (!metadata || metadata.state === "exited") return;
+		await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 50));
+	}
+}
+
+export function removeRunDir(runDir: string): void {
+	rmSync(runDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }
 
 export function effectiveRunState(metadata: RunMetadata): RunState {
