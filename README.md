@@ -80,4 +80,4 @@ Optional spawn flags:
 - `--no-prompt-templates`: disable prompt templates
 - `--no-context-files`: ignore repository instruction files
 
-Nested subagents are disabled. Child sessions do not receive the subagent skill. Children are terminated when their spawning Pi session quits or is replaced, but survive `/reload`.
+Nested subagents are disabled. Child sessions do not receive the subagent skill. Children survive `/reload`. When their spawning Pi session quits or is replaced, running children are suspended: the process stops, but transcript and metadata are kept. Resuming that parent session relaunches them idle with their full history. `subagent stop` removes a run permanently.

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { randomBytes } from "node:crypto";
-import { accessSync, constants, existsSync, mkdirSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,7 @@ import {
 	effectiveRunState,
 	getRunsDir,
 	inboxDir,
+	launchRun,
 	listRuns,
 	readLatestAssistant,
 	readMetadata,
@@ -18,6 +19,7 @@ import {
 	isValidRunName,
 	type InboxMessage,
 	type RunMetadata,
+	tmuxSessionExists,
 	updateMetadata,
 	waitForRunShutdown,
 	writeMetadata,
@@ -64,10 +66,6 @@ function getRun(handle: string): RunMetadata {
 	const metadata = readMetadata(runDirForHandle(handle));
 	if (!metadata) fail(`Unknown subagent: ${handle}`);
 	return metadata;
-}
-
-function tmuxExists(session: string): boolean {
-	return spawnSync("tmux", ["has-session", "-t", session], { stdio: "ignore" }).status === 0;
 }
 
 function generateHandle(): string {
@@ -164,6 +162,13 @@ function spawnSubagent(args: string[]): void {
 	mkdirSync(inboxDir(runDir), { recursive: true, mode: 0o700 });
 	writeFileSync(sessionFile, "", { mode: 0o600 });
 
+	const launchArgs: string[] = [];
+	if (tools) launchArgs.push("--tools", tools);
+	if (noExtensions) launchArgs.push("--no-extensions", "--extension", extensionPath);
+	if (noSkills) launchArgs.push("--no-skills");
+	if (noPromptTemplates) launchArgs.push("--no-prompt-templates");
+	if (noContextFiles) launchArgs.push("--no-context-files");
+
 	const now = new Date().toISOString();
 	const metadata: RunMetadata = {
 		version: 1,
@@ -178,6 +183,7 @@ function spawnSubagent(args: string[]): void {
 		provider,
 		model,
 		thinking,
+		launchArgs,
 		state: "starting",
 		hasStarted: false,
 		createdAt: now,
@@ -185,57 +191,13 @@ function spawnSubagent(args: string[]): void {
 	};
 	writeMetadata(metadata);
 
-	let launcher = "pi";
-	const testLauncher = join(cwd, "pi-test.sh");
+	const initialArgs = files.map((file) => `@${file}`);
+	if (prompts.length > 0) initialArgs.push(`Task:\n${prompts.join("\n\n")}`);
 	try {
-		accessSync(testLauncher, constants.X_OK);
-		launcher = testLauncher;
-	} catch {
-		// Use the installed pi executable.
-	}
-
-	const piArgs = [
-		launcher,
-		"--session",
-		sessionFile,
-		"--provider",
-		provider,
-		"--model",
-		model,
-		"--thinking",
-		thinking,
-	];
-	if (tools) piArgs.push("--tools", tools);
-	if (noExtensions) piArgs.push("--no-extensions", "--extension", extensionPath);
-	if (noSkills) piArgs.push("--no-skills");
-	if (noPromptTemplates) piArgs.push("--no-prompt-templates");
-	if (noContextFiles) piArgs.push("--no-context-files");
-	piArgs.push(...files.map((file) => `@${file}`));
-	if (prompts.length > 0) piArgs.push(`Task:\n${prompts.join("\n\n")}`);
-
-	const result = spawnSync(
-		"tmux",
-		[
-			"new-session",
-			"-d",
-			"-s",
-			tmuxSession,
-			"-x",
-			"120",
-			"-y",
-			"40",
-			"-c",
-			cwd,
-			"--",
-			"env",
-			`PI_SUBAGENT_RUN_DIR=${runDir}`,
-			...piArgs,
-		],
-		{ encoding: "utf8" },
-	);
-	if (result.status !== 0) {
+		launchRun(metadata, initialArgs);
+	} catch (error) {
 		removeRunDir(runDir);
-		fail(result.stderr.trim() || "Failed to create tmux session");
+		throw error;
 	}
 
 	process.stdout.write(`Spawned ${runDisplayName(metadata)}\nState: busy\nAttach: tmux attach -t ${tmuxSession}\n`);
@@ -271,7 +233,7 @@ function sendSubagent(args: string[]): void {
 	const message = messageParts.join(" ").trim();
 	if (!message) fail("send requires a message");
 	const metadata = getRun(handle);
-	if (!tmuxExists(metadata.tmuxSession)) fail(`${handle} is not running`);
+	if (!tmuxSessionExists(metadata.tmuxSession)) fail(`${handle} is not running`);
 
 	const queueDir = inboxDir(metadata.runDir);
 	mkdirSync(queueDir, { recursive: true, mode: 0o700 });
@@ -324,7 +286,7 @@ async function waitSubagent(args: string[]): Promise<void> {
 async function stopSubagent(args: string[]): Promise<void> {
 	if (args.length !== 1) usage();
 	const metadata = getRun(args[0]);
-	const wasRunning = tmuxExists(metadata.tmuxSession);
+	const wasRunning = tmuxSessionExists(metadata.tmuxSession);
 	spawnSync("tmux", ["kill-session", "-t", metadata.tmuxSession], { stdio: "ignore" });
 	if (wasRunning) await waitForRunShutdown(metadata.runDir);
 	removeRunDir(metadata.runDir);

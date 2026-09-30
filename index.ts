@@ -7,12 +7,14 @@ import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendi
 import {
 	effectiveRunState,
 	inboxDir,
+	launchRun,
 	listRuns,
 	readMetadata,
 	removeRunDir,
 	runDisplayName,
 	type InboxMessage,
 	type RunMetadata,
+	tmuxSessionExists,
 	updateMetadata,
 	waitForRunShutdown,
 } from "./shared.ts";
@@ -145,6 +147,23 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		};
 
 		pi.on("session_start", (_event, ctx) => {
+			// Relaunch children that were suspended when this session was last quit or switched away from.
+			for (const run of listRuns(ctx.sessionManager.getSessionId())) {
+				if (!run.suspended || tmuxSessionExists(run.tmuxSession)) continue;
+				if (!existsSync(run.sessionFile)) {
+					removeRunDir(run.runDir);
+					continue;
+				}
+				const starting = updateMetadata(run.runDir, { state: "starting", error: undefined }) ?? run;
+				try {
+					launchRun(starting);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					updateMetadata(run.runDir, { state: "error", error: message });
+					if (ctx.hasUI) ctx.ui.notify(`Could not resume subagent ${runDisplayName(run)}: ${message}`, "error");
+				}
+			}
+
 			if (!ctx.hasUI) return;
 			widgetContext = ctx;
 			refreshWidget();
@@ -158,11 +177,16 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			widgetContext = undefined;
 			ctx.ui.setWidget("subagents", undefined);
 			if (event.reason === "reload") return;
+			// Suspend running children: stop the process but keep transcript and metadata so resuming this
+			// session relaunches them. Children that already exited on their own are discarded.
 			for (const run of listRuns(ctx.sessionManager.getSessionId())) {
-				const wasRunning = effectiveRunState(run) !== "exited";
+				if (!tmuxSessionExists(run.tmuxSession)) {
+					if (!run.suspended) removeRunDir(run.runDir);
+					continue;
+				}
+				updateMetadata(run.runDir, { suspended: true });
 				spawnSync("tmux", ["kill-session", "-t", run.tmuxSession], { stdio: "ignore" });
-				if (wasRunning) await waitForRunShutdown(run.runDir);
-				removeRunDir(run.runDir);
+				await waitForRunShutdown(run.runDir);
 			}
 		});
 		return;
@@ -238,6 +262,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			childSessionId: ctx.sessionManager.getSessionId(),
 			sessionFile: ctx.sessionManager.getSessionFile() ?? metadata.sessionFile,
 			state: ctx.isIdle() ? "idle" : "busy",
+			suspended: undefined,
 			error: undefined,
 		});
 		syncSessionName();

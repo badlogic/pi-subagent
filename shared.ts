@@ -1,5 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+	accessSync,
+	constants,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -19,6 +29,10 @@ export interface RunMetadata {
 	provider: string;
 	model: string;
 	thinking: string;
+	/** Extra pi CLI flags (tools, isolation) reused when the run is relaunched. */
+	launchArgs?: string[];
+	/** Set by the parent when it stops the child on quit or session switch; the child is relaunched on resume. */
+	suspended?: boolean;
 	state: RunState;
 	hasStarted: boolean;
 	createdAt: string;
@@ -137,10 +151,58 @@ export function removeRunDir(runDir: string): void {
 	rmSync(runDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }
 
+export function tmuxSessionExists(session: string): boolean {
+	return spawnSync("tmux", ["has-session", "-t", session], { stdio: "ignore" }).status === 0;
+}
+
+/** Start the child pi process for a run in its tmux session. `initialArgs` are only passed on first spawn. */
+export function launchRun(metadata: RunMetadata, initialArgs: string[] = []): void {
+	let launcher = "pi";
+	const testLauncher = join(metadata.cwd, "pi-test.sh");
+	try {
+		accessSync(testLauncher, constants.X_OK);
+		launcher = testLauncher;
+	} catch {
+		// Use the installed pi executable.
+	}
+
+	const result = spawnSync(
+		"tmux",
+		[
+			"new-session",
+			"-d",
+			"-s",
+			metadata.tmuxSession,
+			"-x",
+			"120",
+			"-y",
+			"40",
+			"-c",
+			metadata.cwd,
+			"--",
+			"env",
+			`PI_SUBAGENT_RUN_DIR=${metadata.runDir}`,
+			launcher,
+			"--session",
+			metadata.sessionFile,
+			"--provider",
+			metadata.provider,
+			"--model",
+			metadata.model,
+			"--thinking",
+			metadata.thinking,
+			...(metadata.launchArgs ?? []),
+			...initialArgs,
+		],
+		{ encoding: "utf8" },
+	);
+	if (result.status !== 0) throw new Error(result.stderr.trim() || "Failed to create tmux session");
+}
+
 export function effectiveRunState(metadata: RunMetadata): RunState {
 	if (
 		(metadata.state === "starting" || metadata.state === "busy" || metadata.state === "idle") &&
-		spawnSync("tmux", ["has-session", "-t", metadata.tmuxSession], { stdio: "ignore" }).status !== 0
+		!tmuxSessionExists(metadata.tmuxSession)
 	) {
 		return "exited";
 	}
